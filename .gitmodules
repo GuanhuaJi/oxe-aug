@@ -6,3 +6,7 @@
 	path = e2fgvi
 	url = https://github.com/GuanhuaJi/e2fgvi.git
 	branch = main
+[submodule "rovi-aug-extension"]
+	path = rovi-aug-extension
+	url = https://github.com/BerkeleyAutomation/rovi-aug-extension.git
+	branch = main
