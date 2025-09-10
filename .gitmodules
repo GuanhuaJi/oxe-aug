@@ -2,3 +2,7 @@
 	path = sam2
 	url = https://github.com/GuanhuaJi/sam2.git
 	branch = main
+[submodule "e2fgvi"]
+	path = e2fgvi
+	url = https://github.com/GuanhuaJi/e2fgvi.git
+	branch = main
