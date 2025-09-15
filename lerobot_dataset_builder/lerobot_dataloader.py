@@ -33,16 +33,11 @@ class LocalLeRobotDataset(Dataset):
     - This class loads **from disk**. Make sure `root/repo_id/meta/info.json` exists.
     - LeRobot can fetch multiple frames around an index via `delta_timestamps`. :contentReference[oaicite:2]{index=2}
     """
-    def __init__(
-        self,
-        root: str | Path,
-        repo_id: str,
-        episodes: Optional[Sequence[int]] = None,
-        delta_timestamps: Optional[Dict[str, List[float]]] = None,
-        select_keys: Optional[Sequence[str]] = None,
-        transforms: Optional[Callable[[Dict[str, Any]], Dict[str, Any]]] = None,
-        video_backend: str = "pyav",
-        download_videos: bool = True,
+    def __init__(self, root, repo_id, episodes = None, delta_timestamps = None,
+        select_keys = None,
+        transforms = None,
+        video_backend = "pyav",
+        download_videos = True,
     ):
         root = Path(root)
         self.local_dir = root / repo_id

@@ -154,21 +154,35 @@ class LocalFolderDataset(Dataset):
         # Global fields from end_effector_poses
         poses = cache.poses
         fd: Dict[str, Any] = {}
-        fd["observation.joints"] = np.concatenate(
-            [
-                np.asarray(poses[j]["joint_positions"][:ROBOT_JOINT_NUMBERS[self.src_robot]], dtype=np.float32),
-                np.atleast_1d(np.asarray(poses[j]["gripper_state"], dtype=np.float32)),
-            ],
-            axis=0,
-        ).astype(np.float32)
+        if self.dataset in ["bridge", "fractal20220817_data", "language_table"]:
+            fd["observation.joints"] = np.concatenate(
+                [
+                    poses['joints'][j][:ROBOT_JOINT_NUMBERS[RLDS_TO_LEROBOT_DATASET_CONFIGS[self.dataset]["robot"]]],
+                    np.atleast_1d(poses['grip'][j])
+                ],
+                axis=0
+            ).astype(np.float32)
+            fd["observation.ee_pose"] = np.concatenate(
+                [np.asarray(poses['pos'][j], dtype=np.float32),
+                np.asarray(poses['quat'][j], dtype=np.float32)],
+                axis=0
+            ).astype(np.float32)
+        else:
+            fd["observation.joints"] = np.concatenate(
+                [
+                    np.asarray(poses[j]["joint_positions"][:ROBOT_JOINT_NUMBERS[self.src_robot]], dtype=np.float32),
+                    np.atleast_1d(np.asarray(poses[j]["gripper_state"], dtype=np.float32)),
+                ],
+                axis=0,
+            ).astype(np.float32)
 
-        fd["observation.ee_pose"] = np.concatenate(
-            [
-                np.asarray(poses[j]["position"], dtype=np.float32),
-                np.asarray(poses[j]["quaternion"], dtype=np.float32),
-            ],
-            axis=0,
-        ).astype(np.float32)
+            fd["observation.ee_pose"] = np.concatenate(
+                [
+                    np.asarray(poses[j]["position"], dtype=np.float32),
+                    np.asarray(poses[j]["quaternion"], dtype=np.float32),
+                ],
+                axis=0,
+            ).astype(np.float32)
 
         # Per-robot fields
         for robot, blob in cache.robots.items():
@@ -215,8 +229,12 @@ class LocalFolderDataset(Dataset):
             rlds_streams = {}
 
         # Poses (global)
-        poses = np.load(ep_dir / f"end_effector_poses_{ep}.npy", allow_pickle=True)
-        lengths.append(len(poses))
+        if self.dataset in ["bridge", "fractal20220817_data", "language_table"]:
+            info_path = ep_dir / f"{self.src_robot}_replay_info_{ep}.npz"
+            poses = load_robot_npz_info(info_path, self.src_robot)
+        else:
+            poses = np.load(ep_dir / f"end_effector_poses_{ep}.npy", allow_pickle=True)
+            lengths.append(len(poses))
 
         uniq = set(lengths)
         if self.strict_lengths and len(uniq) != 1:
@@ -251,18 +269,18 @@ def local_collate(batch: List[Dict[str, Any]]) -> Dict[str, Any]:
     return _collate(batch)
 
 def make_local_folder_dataloader(
-    trg_root: str | Path,
-    dataset: str,
-    split: str,
-    robots: Sequence[str],
-    episodes: Sequence[int],
-    image_size: Tuple[int, int] | None = None,
-    batch_size: int = 8,
-    shuffle: bool = False,
-    num_workers: int = 0,
-    include_rlds: bool = False,      # default False to avoid TFDS requirement
-    preload_videos: bool = True,
-) -> DataLoader:
+    trg_root,
+    dataset,
+    split,
+    robots,
+    episodes,
+    image_size=None,
+    batch_size=8,
+    shuffle=False,
+    num_workers=0,
+    include_rlds=False,      # default False to avoid TFDS requirement
+    preload_videos=True,
+):
     if image_size is None:
         image_size = RLDS_TO_LEROBOT_DATASET_CONFIGS[dataset]["image_size"]
     ds = LocalFolderDataset(

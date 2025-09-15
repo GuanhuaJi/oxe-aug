@@ -125,8 +125,18 @@ python /home/guanhuaji/lerobot_rovi_aug/check_dataset.py --root /home/abinayadin
 python /home/guanhuaji/lerobot_rovi_aug/check_dataset.py --root /home/abinayadinesh/rovi_aug_extension_full/taco_play/train --robots ur5e sawyer xarm7 jaco kuka_iiwa kinova3 google_robot widowX --out /home/guanhuaji/lerobot_rovi_aug/check
 python /home/guanhuaji/lerobot_rovi_aug/check_dataset.py --root /home/abinayadinesh/rovi_aug_extension_full/ucsd_kitchen_dataset_converted_externally_to_rlds/train --robots panda sawyer xarm7 jaco kuka_iiwa kinova3 google_robot widowX --out /home/guanhuaji/lerobot_rovi_aug/check
 python /home/guanhuaji/lerobot_rovi_aug/check_dataset.py --root /home/abinayadinesh/rovi_aug_extension_full/utaustin_mutex/train --robots ur5e sawyer xarm7 jaco kuka_iiwa kinova3 google_robot widowX --out /home/guanhuaji/lerobot_rovi_aug/check
+python /home/guanhuaji/lerobot_rovi_aug/check_dataset.py --root /home/abinayadinesh/rovi_aug_extension_full/utokyo_xarm_pick_and_place_converted_externally_to_rlds/train --robots ur5e sawyer panda jaco kuka_iiwa kinova3 google_robot widowX --out /home/guanhuaji/lerobot_rovi_aug/check
+python /home/guanhuaji/lerobot_rovi_aug/check_dataset.py --root /home/abinayadinesh/rovi_aug_extension_full/bridge/train --robots widowX --out /home/guanhuaji/lerobot_rovi_aug/check
+python /home/guanhuaji/lerobot_rovi_aug/check_dataset.py --root /home/abinayadinesh/rovi_aug_extension_full/fractal20220817_data/train --robots ur5e sawyer xarm7 jaco kuka_iiwa kinova3 google_robot --out /home/guanhuaji/lerobot_rovi_aug/check --start 0 --end 87212
+python /home/guanhuaji/lerobot_rovi_aug/check_dataset.py --root /home/abinayadinesh/rovi_aug_extension_full/jaco_play/train --robots ur5e sawyer xarm7 panda widowX kuka_iiwa kinova3 google_robot --out /home/guanhuaji/lerobot_rovi_aug/check
+
+
+python /home/guanhuaji/lerobot_rovi_aug/check_dataset.py --root /home/abinayadinesh/rovi_aug_extension_full/bridge/test --robots panda ur5e sawyer panda jaco kuka_iiwa kinova3 google_robot widowX --out /home/guanhuaji/lerobot_rovi_aug/check
+python /home/guanhuaji/lerobot_rovi_aug/check_dataset.py --root /home/abinayadinesh/rovi_aug_extension_full/nyu_franka_play_dataset_converted_externally_to_rlds/val --robots ur5e sawyer xarm7 jaco kuka_iiwa kinova3 google_robot widowX --out /home/guanhuaji/lerobot_rovi_aug/check --start 0 --end 1
+
 
 python /home/guanhuaji/lerobot_rovi_aug/check_dataset.py --root /home/abinayadinesh/rovi_aug_extension_full/toto/test --robots ur5e sawyer xarm7 jaco kuka_iiwa kinova3 google_robot widowX --out /home/guanhuaji/lerobot_rovi_aug/check
+python /home/guanhuaji/lerobot_rovi_aug/check_dataset.py --root /home/abinayadinesh/rovi_aug_extension_full/language_table/train --robots ur5e sawyer jaco kuka_iiwa kinova3 google_robot panda xarm7 --out /home/guanhuaji/lerobot_rovi_aug/check --start 0 --end 442226
 
 
 '''
