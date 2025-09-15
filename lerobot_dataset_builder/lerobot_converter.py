@@ -5,37 +5,81 @@ import logging
 import os
 os.environ["SVT_LOG"] = "0"
 import sys
-from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, Iterable, Iterator, List, Optional, Sequence, Tuple
+import time
+from contextlib import contextmanager
+from collections import defaultdict
 
 import cv2
 import numpy as np
 from tqdm import tqdm
-from concurrent.futures import ProcessPoolExecutor, as_completed
-import multiprocessing as mp
 
 from lerobot.datasets.lerobot_dataset import LeRobotDataset
 from config import RLDS_TO_LEROBOT_DATASET_CONFIGS, ROBOT_JOINT_NUMBERS
 
 LOG = logging.getLogger("build_lerobot")
 
-# Global set at runtime (in main) and in each worker via initializer
-TRG_ROOT: Optional[Path] = None
+# Globals
+TRG_ROOT = None
+TIME_ON = False  # set by --time
 
 
-def _init_worker(trg_root_str: str):
-    """Initializer for ProcessPoolExecutor workers so they can see TRG_ROOT."""
-    global TRG_ROOT
-    TRG_ROOT = Path(trg_root_str)
-    # OpenCV tends to misbehave with fork/spawn and many threads.
-    cv2.setNumThreads(0)
+# ------------------------- timing helpers -------------------------
+
+class PhaseStats:
+    def __init__(self):
+        self.totals = defaultdict(float)
+        self.counts = defaultdict(int)
+
+    def add(self, name, dt):
+        self.totals[name] += dt
+        self.counts[name] += 1
+
+    def items_sorted(self):
+        return sorted(self.totals.items(), key=lambda kv: kv[1], reverse=True)
+
+    def total(self):
+        return sum(self.totals.values())
 
 
-@dataclass
+@contextmanager
+def timed(stats, name):
+    if not TIME_ON:
+        yield
+        return
+    t0 = time.perf_counter()
+    try:
+        yield
+    finally:
+        stats.add(name, time.perf_counter() - t0)
+
+
+def _print_summary(stats):
+    if not TIME_ON:
+        return
+    total = stats.total()
+    if total <= 0:
+        LOG.info("No timing recorded.")
+        return
+    LOG.info("\n===== Timing summary (all episodes) =====")
+    LOG.info("{:<28s} {:>10s} {:>9s} {:>9s} {:>12s}".format(
+        "phase", "total(s)", "percent", "count", "avg(ms)"
+    ))
+    for name, sec in stats.items_sorted():
+        cnt = stats.counts.get(name, 0)
+        avg_ms = (sec / max(cnt, 1)) * 1000.0
+        LOG.info("{:<28s} {:>10.3f} {:>8.1f}% {:>9d} {:>12.2f}".format(
+            name, sec, 100.0 * sec / total, cnt, avg_ms
+        ))
+    LOG.info("=========================================\n")
+
+
+# --------------------------- helpers ---------------------------
+
 class VideoSource:
-    path: Path
-    target_hw: Tuple[int, int]
+    def __init__(self, path, target_hw):
+        self.path = Path(path)
+        self.target_hw = target_hw  # (h, w)
 
     def __iter__(self):
         cap = cv2.VideoCapture(str(self.path))
@@ -49,34 +93,31 @@ class VideoSource:
                 h, w = self.target_hw
                 if (bgr.shape[0], bgr.shape[1]) != (h, w):
                     bgr = cv2.resize(bgr, (w, h), interpolation=cv2.INTER_AREA)
-                yield bgr[..., ::-1]  # RGB
+                yield bgr[..., ::-1]  # RGB uint8
         finally:
             cap.release()
 
 
+class EpisodeKinematics:
+    def __init__(self, pos, quat, grip, joints, base_t, base_r, tgt_pos, tgt_quat):
+        self.pos = pos
+        self.quat = quat
+        self.grip = grip
+        self.joints = joints
+        self.base_t = base_t
+        self.base_r = base_r
+        self.tgt_pos = tgt_pos
+        self.tgt_quat = tgt_quat
+
+
 def compute_ee_error(pos, quat, tgt_pos, tgt_quat):
-    """Compute end-effector error (pos_error + quat_error)."""
     pos_error = tgt_pos - pos
-    quat_error = tgt_quat - quat  # placeholder metric; replace if needed
+    quat_error = tgt_quat - quat  # placeholder metric
     return np.concatenate([pos_error, quat_error], axis=-1).astype(np.float32)
 
 
-@dataclass
-class EpisodeKinematics:
-    pos: np.ndarray          # (T,3)
-    quat: np.ndarray         # (T,4)
-    grip: np.ndarray         # (T,) or (T,1)
-    joints: np.ndarray       # (T,J)
-    base_t: np.ndarray       # (3,)  episode-constant
-    base_r: np.ndarray       # (1,)  episode-constant
-    tgt_pos: Optional[np.ndarray] = None  # (T,3)
-    tgt_quat: Optional[np.ndarray] = None # (T,4)
-
-
 def load_robot_npz_info(npz_path, robot, T_hint=None):
-    """Load and normalize one robot's kinematic NPZ."""
     info = dict(np.load(npz_path, allow_pickle=True))
-
     pos = np.float32(info["replay_positions"])
     quat = np.float32(info["replay_quats"])
     grip = np.float32(info["gripper_state"]).reshape(-1)
@@ -85,40 +126,11 @@ def load_robot_npz_info(npz_path, robot, T_hint=None):
     base_r = np.float32(info["rotation"])
     tgt_pos = np.float32(info["target_positions"])
     tgt_quat = np.float32(info["target_quats"])
-    _ = ROBOT_JOINT_NUMBERS[robot]  # num_joints not needed directly here
+    _ = ROBOT_JOINT_NUMBERS[robot]  # not used directly
 
     base_t = np.asarray(base_t[0], np.float32).reshape(3,)
     base_r = np.asarray(base_r[0], np.float32).reshape(1,)
-
-    return EpisodeKinematics(
-        pos=pos, quat=quat, grip=grip, joints=jnts, base_t=base_t, base_r=base_r,
-        tgt_pos=tgt_pos, tgt_quat=tgt_quat
-    )
-
-
-def fetch_rlds_episode_images(dataset, split, ep_index):
-    """
-    Load exactly one RLDS episode using TFDS and return RGB frames list.
-    """
-    import tensorflow_datasets as tfds
-    builder = tfds.builder_from_directory(
-        builder_dir=f"gs://gresearch/robotics/{dataset}/0.1.0"
-    )
-    split_spec = f"{split}[{ep_index}:{ep_index+1}]"
-    read_config = tfds.ReadConfig(
-        interleave_cycle_length=1,
-        shuffle_seed=None,
-    )
-    ds = builder.as_dataset(split=split_spec, shuffle_files=False, read_config=read_config)
-
-    frames = []
-    for episode in ds:  # at most one
-        steps_ds = episode["steps"]
-        for step in steps_ds:
-            img = step["observation"]["image"].numpy()
-            frames.append(np.asarray(img))
-        break
-    return frames
+    return EpisodeKinematics(pos, quat, grip, jnts, base_t, base_r, tgt_pos, tgt_quat)
 
 
 def fetch_rlds_episode_fields(dataset, split, ep_index, mapping):
@@ -134,10 +146,7 @@ def fetch_rlds_episode_fields(dataset, split, ep_index, mapping):
         fetch_rlds_episode_fields._builders[key] = builder
 
     split_spec = f"{split}[{ep_index}:{ep_index+1}]"
-    read_config = tfds.ReadConfig(
-        interleave_cycle_length=1,
-        shuffle_seed=None,
-    )
+    read_config = tfds.ReadConfig(interleave_cycle_length=1, shuffle_seed=None)
     ds = builder.as_dataset(split=split_spec, shuffle_files=False, read_config=read_config)
 
     out = {m["lerobot_path"]: [] for m in mapping}
@@ -160,10 +169,7 @@ def fetch_rlds_episode_fields(dataset, split, ep_index, mapping):
 
 
 def build_feature_schema(dataset, h, w, robots):
-    """Build feature schema with new structure."""
     feats = {}
-
-    # robot-specific features
     for robot in robots:
         feats.update({
             f"observation.{robot}.joints":           {"dtype": "float32", "shape": (ROBOT_JOINT_NUMBERS[robot] + 1,)},
@@ -173,130 +179,115 @@ def build_feature_schema(dataset, h, w, robots):
             f"observation.{robot}.ee_error":         {"dtype": "float32", "shape": (7,)},
             f"observation.images.{robot}":           {"dtype": "video",   "shape": (h, w, 3)},
         })
-
     for m in RLDS_TO_LEROBOT_DATASET_CONFIGS[dataset]["rlds_to_lerobot_mappings"]:
-        dst   = m["lerobot_path"]
-        dtype = m["dtype"]
-        shape = m["shape"]
-        feats[dst] = {"dtype": dtype, "shape": shape}
-
+        feats[m["lerobot_path"]] = {"dtype": m["dtype"], "shape": m["shape"]}
     feats["observation.joints"]  = {"dtype": "float32", "shape": (ROBOT_JOINT_NUMBERS[RLDS_TO_LEROBOT_DATASET_CONFIGS[dataset]["robot"]] + 1,)}
     feats["observation.ee_pose"] = {"dtype": "float32", "shape": (7,)}
     return feats
 
 
-def _require_trg_root() -> Path:
+def _require_trg_root():
     if TRG_ROOT is None:
         raise RuntimeError("TRG_ROOT is not initialized. Pass --trg_root or set $TRG_ROOT.")
     return TRG_ROOT
 
 
-def _prepare_episode(ep, dataset, split, robots, h, w):
+# ---------------------------- core pipeline ----------------------------
+
+def _prepare_episode(ep, dataset, split, robots, h, w, stats):
     cv2.setNumThreads(0)
     trg_root = _require_trg_root()
 
     trg = {}
     for robot in robots:
-        ep_dir = trg_root / dataset / split / str(ep)
+        ep_dir = Path(trg_root) / dataset / split / str(ep)
         video_path = ep_dir / f"{robot}_overlay_{ep}_algo_final.mp4"
         info_path  = ep_dir / f"{robot}_replay_info_{ep}.npz"
-        vs = VideoSource(video_path, (h, w))
-        info = load_robot_npz_info(info_path, robot)
-        trg[robot] = dict(vs=vs, info=info)
+
+        with timed(stats, f"load_npz[{robot}]"):
+            info = load_robot_npz_info(info_path, robot)
+
+        with timed(stats, f"video_decode[{robot}]"):
+            frames = [f for f in VideoSource(video_path, (h, w))]
+
+        trg[robot] = dict(frames=frames, info=info)
 
     rlds_mappings = RLDS_TO_LEROBOT_DATASET_CONFIGS[dataset]["rlds_to_lerobot_mappings"]
-    rlds_streams = fetch_rlds_episode_fields(dataset, split, ep, rlds_mappings)
+    with timed(stats, "rlds_fetch"):
+        rlds_streams = fetch_rlds_episode_fields(dataset, split, ep, rlds_mappings)
 
-    for r, blob in trg.items():
-        frames = [f for f in blob["vs"]]
-        blob["frames"] = frames
+    task = rlds_streams.get("natural_language_instruction", [""])[0]
 
-    task = rlds_streams["natural_language_instruction"][0]
-    poses = np.load(trg_root / dataset / split / str(ep) / f"end_effector_poses_{ep}.npy", allow_pickle=True)
+    if dataset in ["bridge", "fractal20220817_data", "language_table"]:
+        source_info_path = Path(trg_root) / dataset / split / str(ep) / f"{RLDS_TO_LEROBOT_DATASET_CONFIGS[dataset]['robot']}_replay_info_{ep}.npz"
+        source_info = load_robot_npz_info(source_info_path, RLDS_TO_LEROBOT_DATASET_CONFIGS[dataset]['robot'])
+        poses_mode = "source_info"
+    else:
+        poses = np.load(Path(trg_root) / dataset / split / str(ep) / f"end_effector_poses_{ep}.npy", allow_pickle=True)
+        poses_mode = "poses_file"
 
-    frames_list = []
-    for j in range(len(trg[robots[0]]["frames"])):
-        fd = {}
-        fd["observation.joints"] = np.concatenate(
-            [
-                poses[j]["joint_positions"][:ROBOT_JOINT_NUMBERS[RLDS_TO_LEROBOT_DATASET_CONFIGS[dataset]["robot"]]],
-                np.atleast_1d(poses[j]["gripper_state"])
-            ],
-            axis=0
-        ).astype(np.float32)
-        fd["observation.ee_pose"] = np.concatenate(
-            [np.asarray(poses[j]["position"], dtype=np.float32),
-             np.asarray(poses[j]["quaternion"], dtype=np.float32)],
-            axis=0
-        ).astype(np.float32)
+    with timed(stats, "build_frames_list"):
+        frames_list = []
+        T = len(trg[robots[0]]["frames"])
+        for j in range(T):
+            fd = {}
 
-        for robot, blob in trg.items():
-            info = blob["info"]
-            ee_pose = np.concatenate([info.pos[j], info.quat[j]], axis=0)
-            ee_error = compute_ee_error(info.pos[j], info.quat[j], info.tgt_pos[j], info.tgt_quat[j])
-            fd[f"observation.{robot}.joints"] = np.append(info.joints[j], info.grip[j]).astype(np.float32)
-            fd[f"observation.{robot}.ee_pose"]          = ee_pose
-            fd[f"observation.{robot}.base_position"]    = info.base_t
-            fd[f"observation.{robot}.base_orientation"] = info.base_r
-            fd[f"observation.{robot}.ee_error"]         = ee_error
-            fd[f"observation.images.{robot}"]           = blob["frames"][j]
+            if poses_mode == "source_info":
+                fd["observation.joints"] = np.concatenate(
+                    [
+                        source_info.joints[j][:ROBOT_JOINT_NUMBERS[RLDS_TO_LEROBOT_DATASET_CONFIGS[dataset]["robot"]]],
+                        np.atleast_1d(source_info.grip[j])
+                    ],
+                    axis=0
+                ).astype(np.float32)
+                fd["observation.ee_pose"] = np.concatenate(
+                    [np.asarray(source_info.pos[j], dtype=np.float32),
+                     np.asarray(source_info.quat[j], dtype=np.float32)],
+                    axis=0
+                ).astype(np.float32)
+            else:
+                fd["observation.joints"] = np.concatenate(
+                    [
+                        poses[j]["joint_positions"][:ROBOT_JOINT_NUMBERS[RLDS_TO_LEROBOT_DATASET_CONFIGS[dataset]["robot"]]],
+                        np.atleast_1d(poses[j]["gripper_state"])
+                    ],
+                    axis=0
+                ).astype(np.float32)
+                fd["observation.ee_pose"] = np.concatenate(
+                    [np.asarray(poses[j]["position"], dtype=np.float32),
+                     np.asarray(poses[j]["quaternion"], dtype=np.float32)],
+                    axis=0
+                ).astype(np.float32)
 
-        for dst_key, seq in rlds_streams.items():
-            fd[dst_key] = seq[j]
+            for robot, blob in trg.items():
+                info = blob["info"]
+                ee_pose = np.concatenate([info.pos[j], info.quat[j]], axis=0)
+                ee_error = compute_ee_error(info.pos[j], info.quat[j], info.tgt_pos[j], info.tgt_quat[j])
+                fd[f"observation.{robot}.joints"]           = np.append(info.joints[j], info.grip[j]).astype(np.float32)
+                fd[f"observation.{robot}.ee_pose"]          = ee_pose
+                fd[f"observation.{robot}.base_position"]    = info.base_t
+                fd[f"observation.{robot}.base_orientation"] = info.base_r
+                fd[f"observation.{robot}.ee_error"]         = ee_error
+                # single-process, no async race; direct handoff is fine
+                fd[f"observation.images.{robot}"]           = blob["frames"][j]
 
-        frames_list.append(fd)
+            for dst_key, seq in rlds_streams.items():
+                fd[dst_key] = seq[j]
+
+            frames_list.append(fd)
 
     return (ep, task, frames_list)
 
 
-def _precheck_lengths(dataset, split, robots, start, end, h, w):
-    trg_root = _require_trg_root()
-    for ep in range(start, end):
-        ep_dir = trg_root / dataset / split / str(ep)
-        lens = []
-        for robot in robots:
-            info_path = ep_dir / f"{robot}_replay_info_{ep}.npz"
-            info = load_robot_npz_info(info_path, robot)
-            lens.append(info.pos.shape[0])
-
-            video_path = ep_dir / f"{robot}_overlay_{ep}_algo_final.mp4"
-            vs = VideoSource(video_path, (h, w))
-            vcount = sum(1 for _ in vs)
-            lens.append(vcount)
-
-        pairs = RLDS_TO_LEROBOT_DATASET_CONFIGS[dataset]["rlds_to_lerobot_mappings"]
-        if pairs:
-            rlds = fetch_rlds_episode_fields(dataset, split, ep, pairs)
-            # Keep this simple—if there is an image stream, check its length
-            for m in pairs:
-                if m["rlds_path"].rstrip("/").endswith("/image"):
-                    lens.append(len(rlds[m["lerobot_path"]]))
-                    break
-
-        if len(set(lens)) != 1:
-            raise ValueError(f"Length mismatch in episode {ep}: {lens}")
-
-
-def build_dataset(
-    dataset: str,
-    split: str,
-    robots: Sequence[str],
-    start: int,
-    end: int,
-    fps: int,
-    out_root: Path,
-    repo_id: Optional[str] = None,
-    num_workers: int = 1,
-):
-    dataset = dataset.strip()
-    split = split.strip()
+def build_dataset(dataset, split, robots, start, end, fps, out_root, repo_id=None, enable_time=False):
+    stats = PhaseStats()
     h, w = RLDS_TO_LEROBOT_DATASET_CONFIGS[dataset]["image_size"]
 
     feats = build_feature_schema(dataset, h, w, robots)
 
     if repo_id is None:
         repo_id = f"{dataset}_{split}_{start}_{end}"
-    out_dir = out_root / repo_id
+    out_dir = Path(out_root) / repo_id
     if out_dir.exists():
         LOG.warning("Output dir %s exists; appending episodes.", out_dir)
 
@@ -309,36 +300,19 @@ def build_dataset(
     )
 
     ep_range = list(range(start, end))
-    LOG.info("Building with num_workers=%d over %d episodes", num_workers, len(ep_range))
+    LOG.info("Building sequentially over %d episodes", len(ep_range))
 
-    if num_workers <= 1:
-        for ep in tqdm(ep_range, desc="episodes", unit="ep"):
-            res = _prepare_episode(ep, dataset, split, robots, h, w)
-            if res is None:
-                continue
-            ep_id, task, frames_list = res
-            for fd in frames_list:
+    for ep in tqdm(ep_range, desc="episodes", unit="ep"):
+        ep_id, task, frames_list = _prepare_episode(ep, dataset, split, robots, h, w, stats)
+
+        for fd in frames_list:
+            with timed(stats, "add_frame"):
                 ds.add_frame(fd, task=task)
-            ds.save_episode()
-    else:
-        # Ensure workers receive the same TRG_ROOT
-        trg_root = _require_trg_root()
-        with ProcessPoolExecutor(
-            max_workers=num_workers,
-            mp_context=mp.get_context("spawn"),
-            initializer=_init_worker,
-            initargs=(str(trg_root),),
-        ) as ex:
-            futs = [ex.submit(_prepare_episode, ep, dataset, split, robots, h, w) for ep in ep_range]
-            for fut in tqdm(as_completed(futs), total=len(futs), desc="episodes", unit="ep"):
-                res = fut.result()
-                if res is None:
-                    continue
-                ep_id, task, frames_list = res
-                for fd in frames_list:
-                    ds.add_frame(fd, task=task)
-                ds.save_episode()
 
+        with timed(stats, "save_episode"):
+            ds.save_episode()
+
+    _print_summary(stats)
     LOG.info("Done. Dataset stored in %s", out_dir)
 
 
@@ -352,14 +326,9 @@ def main():
     p.add_argument("--fps", default=30, type=int)
     p.add_argument("--out_root", default="/home/abinayadinesh/lerobot_dataset", type=str)
     p.add_argument("--log_level", default="INFO", type=str)
-    p.add_argument("--num_workers", type=int, default=1,
-                   help="Episodes prepared in parallel; writes stay sequential.")
-    p.add_argument(
-        "--trg_root",
-        default=None,
-        type=str,
-        help="Root containing per-episode NPZ/MP4 (or set $TRG_ROOT). Layout: {trg_root}/{dataset}/{split}/{ep}/",
-    )
+    p.add_argument("--trg_root", default=None, type=str,
+                   help="Root containing per-episode NPZ/MP4. Layout: {trg_root}/{dataset}/{split}/{ep}/")
+    p.add_argument("--time", action="store_true", help="Enable timing summary.")
     args = p.parse_args()
 
     logging.basicConfig(
@@ -369,15 +338,16 @@ def main():
         stream=sys.stdout,
     )
 
-    # OpenCV + multiprocessing friendliness
-    mp.set_start_method("spawn", force=True)
+    # OpenCV + multiprocessing friendliness (single process anyway)
+    cv2.setNumThreads(0)
 
-    # Resolve TRG_ROOT from CLI or environment
+    # Resolve TRG_ROOT
     trg_root_str = args.trg_root or os.environ.get("TRG_ROOT")
     if not trg_root_str:
         p.error("--trg_root not provided and $TRG_ROOT is not set")
-    global TRG_ROOT
+    global TRG_ROOT, TIME_ON
     TRG_ROOT = Path(trg_root_str)
+    TIME_ON = bool(args.time)
 
     build_dataset(
         dataset=args.dataset,
@@ -386,10 +356,52 @@ def main():
         start=args.start,
         end=args.end,
         fps=args.fps,
-        out_root=Path(args.out_root),
-        num_workers=args.num_workers,
+        out_root=args.out_root,
+        enable_time=TIME_ON,
     )
 
 
 if __name__ == "__main__":
     main()
+
+
+
+
+
+'''
+python /home/guanhuaji/lerobot_rovi_aug/lerobot_converter.py --dataset ucsd_kitchen_dataset_converted_externally_to_rlds --split train --robots widowX sawyer ur5e google_robot jaco kinova3 kuka_iiwa panda --start 0 --end 150 --fps 30 --out_root /home/abinayadinesh/lerobot_dataset --trg_root /home/abinayadinesh/rovi_aug_extension_full
+
+python /home/guanhuaji/lerobot_rovi_aug/lerobot_converter.py --dataset utaustin_mutex --split train --robots widowX sawyer ur5e google_robot jaco kinova3 kuka_iiwa xarm7 --start 0 --end 1500 --fps 30 --out_root /home/abinayadinesh/lerobot_dataset --trg_root /home/abinayadinesh/rovi_aug_extension_full
+
+python /home/guanhuaji/lerobot_rovi_aug/lerobot_converter.py --dataset kaist_nonprehensile_converted_externally_to_rlds --split train --robots widowX sawyer ur5e google_robot jaco kinova3 kuka_iiwa xarm7 --start 0 --end 201 --fps 30 --out_root /home/abinayadinesh/lerobot_dataset --trg_root /home/abinayadinesh/rovi_aug_extension_full
+
+python /home/guanhuaji/lerobot_rovi_aug/lerobot_converter.py --dataset berkeley_autolab_ur5 --split test --robots widowX sawyer panda google_robot jaco kinova3 kuka_iiwa xarm7 --start 0 --end 104 --fps 30 --out_root /home/abinayadinesh/lerobot_dataset --trg_root /home/abinayadinesh/rovi_aug_extension_full
+
+python /home/guanhuaji/lerobot_rovi_aug/lerobot_converter.py --dataset toto --split test --robots widowX sawyer ur5e google_robot jaco kinova3 kuka_iiwa xarm7 --start 0 --end 101 --fps 30 --out_root /home/abinayadinesh/lerobot_dataset --trg_root /home/abinayadinesh/rovi_aug_extension_full
+
+python /home/guanhuaji/lerobot_rovi_aug/lerobot_converter.py --dataset utokyo_xarm_pick_and_place_converted_externally_to_rlds --split train --robots widowX sawyer ur5e google_robot jaco kinova3 kuka_iiwa panda --start 0 --end 92 --fps 30 --out_root /home/abinayadinesh/lerobot_dataset --trg_root /home/abinayadinesh/rovi_aug_extension_full
+
+python /home/guanhuaji/lerobot_rovi_aug/lerobot_converter.py --dataset utokyo_xarm_pick_and_place_converted_externally_to_rlds --split train --robots widowX sawyer ur5e google_robot jaco kinova3 kuka_iiwa panda --start 0 --end 10 --fps 30 --out_root /home/abinayadinesh/lerobot_dataset --trg_root /home/abinayadinesh/rovi_aug_extension_full
+
+python /home/guanhuaji/lerobot_rovi_aug/lerobot_converter.py --dataset taco_play --split test --robots widowX sawyer ur5e google_robot jaco kinova3 kuka_iiwa xarm7 --start 0 --end 361 --fps 30 --out_root /home/abinayadinesh/lerobot_dataset --trg_root /home/abinayadinesh/rovi_aug_extension_full
+
+python /home/guanhuaji/lerobot_rovi_aug/lerobot_converter_fast.py --dataset toto \
+    --split train --robots widowX sawyer ur5e google_robot jaco kinova3 kuka_iiwa xarm7 \
+        --start 0 --end 2 --fps 30 --out_root /home/abinayadinesh/lerobot_dataset \
+            --trg_root /home/abinayadinesh/rovi_aug_extension_full --num_workers 4 --img_writer_threads 16 --img_writer_procs 4
+
+python /home/guanhuaji/lerobot_rovi_aug/lerobot_converter_fast.py --dataset bridge \
+    --split train --robots panda sawyer ur5e google_robot jaco kinova3 kuka_iiwa xarm7 \
+        --start 0 --end 100 --fps 30 --out_root /home/abinayadinesh/lerobot_dataset \
+            --trg_root /home/abinayadinesh/rovi_aug_extension_full --num_workers 4 --img_writer_threads 16 --img_writer_procs 4
+
+python /home/guanhuaji/lerobot_rovi_aug/lerobot_converter_fast.py --dataset bridge \
+    --split train --robots panda sawyer ur5e google_robot jaco kinova3 kuka_iiwa xarm7 \
+        --start 0 --end 3 --fps 30 --out_root /home/abinayadinesh/lerobot_dataset \
+            --trg_root /home/abinayadinesh/rovi_aug_extension_full
+
+python /home/guanhuaji/lerobot_rovi_aug/lerobot_converter_fast.py --dataset fractal20220817_data \
+    --split train --robots panda sawyer ur5e jaco kinova3 kuka_iiwa xarm7 \
+        --start 0 --end 10 --fps 30 --out_root /home/abinayadinesh/lerobot_dataset \
+            --trg_root /home/abinayadinesh/rovi_aug_extension_full
+'''
