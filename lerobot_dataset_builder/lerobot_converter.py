@@ -21,10 +21,7 @@ LOG = logging.getLogger("build_lerobot")
 
 # Globals
 TRG_ROOT = None
-TIME_ON = False  # set by --time
-
-
-# ------------------------- timing helpers -------------------------
+TIME_ON = False
 
 class PhaseStats:
     def __init__(self):
@@ -363,45 +360,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-
-
-
-
-'''
-python /home/guanhuaji/lerobot_rovi_aug/lerobot_converter.py --dataset ucsd_kitchen_dataset_converted_externally_to_rlds --split train --robots widowX sawyer ur5e google_robot jaco kinova3 kuka_iiwa panda --start 0 --end 150 --fps 30 --out_root /home/abinayadinesh/lerobot_dataset --trg_root /home/abinayadinesh/rovi_aug_extension_full
-
-python /home/guanhuaji/lerobot_rovi_aug/lerobot_converter.py --dataset utaustin_mutex --split train --robots widowX sawyer ur5e google_robot jaco kinova3 kuka_iiwa xarm7 --start 0 --end 1500 --fps 30 --out_root /home/abinayadinesh/lerobot_dataset --trg_root /home/abinayadinesh/rovi_aug_extension_full
-
-python /home/guanhuaji/lerobot_rovi_aug/lerobot_converter.py --dataset kaist_nonprehensile_converted_externally_to_rlds --split train --robots widowX sawyer ur5e google_robot jaco kinova3 kuka_iiwa xarm7 --start 0 --end 201 --fps 30 --out_root /home/abinayadinesh/lerobot_dataset --trg_root /home/abinayadinesh/rovi_aug_extension_full
-
-python /home/guanhuaji/lerobot_rovi_aug/lerobot_converter.py --dataset berkeley_autolab_ur5 --split test --robots widowX sawyer panda google_robot jaco kinova3 kuka_iiwa xarm7 --start 0 --end 104 --fps 30 --out_root /home/abinayadinesh/lerobot_dataset --trg_root /home/abinayadinesh/rovi_aug_extension_full
-
-python /home/guanhuaji/lerobot_rovi_aug/lerobot_converter.py --dataset toto --split test --robots widowX sawyer ur5e google_robot jaco kinova3 kuka_iiwa xarm7 --start 0 --end 101 --fps 30 --out_root /home/abinayadinesh/lerobot_dataset --trg_root /home/abinayadinesh/rovi_aug_extension_full
-
-python /home/guanhuaji/lerobot_rovi_aug/lerobot_converter.py --dataset utokyo_xarm_pick_and_place_converted_externally_to_rlds --split train --robots widowX sawyer ur5e google_robot jaco kinova3 kuka_iiwa panda --start 0 --end 92 --fps 30 --out_root /home/abinayadinesh/lerobot_dataset --trg_root /home/abinayadinesh/rovi_aug_extension_full
-
-python /home/guanhuaji/lerobot_rovi_aug/lerobot_converter.py --dataset utokyo_xarm_pick_and_place_converted_externally_to_rlds --split train --robots widowX sawyer ur5e google_robot jaco kinova3 kuka_iiwa panda --start 0 --end 10 --fps 30 --out_root /home/abinayadinesh/lerobot_dataset --trg_root /home/abinayadinesh/rovi_aug_extension_full
-
-python /home/guanhuaji/lerobot_rovi_aug/lerobot_converter.py --dataset taco_play --split test --robots widowX sawyer ur5e google_robot jaco kinova3 kuka_iiwa xarm7 --start 0 --end 361 --fps 30 --out_root /home/abinayadinesh/lerobot_dataset --trg_root /home/abinayadinesh/rovi_aug_extension_full
-
-python /home/guanhuaji/lerobot_rovi_aug/lerobot_converter_fast.py --dataset toto \
-    --split train --robots widowX sawyer ur5e google_robot jaco kinova3 kuka_iiwa xarm7 \
-        --start 0 --end 2 --fps 30 --out_root /home/abinayadinesh/lerobot_dataset \
-            --trg_root /home/abinayadinesh/rovi_aug_extension_full --num_workers 4 --img_writer_threads 16 --img_writer_procs 4
-
-python /home/guanhuaji/lerobot_rovi_aug/lerobot_converter_fast.py --dataset bridge \
-    --split train --robots panda sawyer ur5e google_robot jaco kinova3 kuka_iiwa xarm7 \
-        --start 0 --end 100 --fps 30 --out_root /home/abinayadinesh/lerobot_dataset \
-            --trg_root /home/abinayadinesh/rovi_aug_extension_full --num_workers 4 --img_writer_threads 16 --img_writer_procs 4
-
-python /home/guanhuaji/lerobot_rovi_aug/lerobot_converter_fast.py --dataset bridge \
-    --split train --robots panda sawyer ur5e google_robot jaco kinova3 kuka_iiwa xarm7 \
-        --start 0 --end 3 --fps 30 --out_root /home/abinayadinesh/lerobot_dataset \
-            --trg_root /home/abinayadinesh/rovi_aug_extension_full
-
-python /home/guanhuaji/lerobot_rovi_aug/lerobot_converter_fast.py --dataset fractal20220817_data \
-    --split train --robots panda sawyer ur5e jaco kinova3 kuka_iiwa xarm7 \
-        --start 0 --end 10 --fps 30 --out_root /home/abinayadinesh/lerobot_dataset \
-            --trg_root /home/abinayadinesh/rovi_aug_extension_full
-'''

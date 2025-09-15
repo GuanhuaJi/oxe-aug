@@ -47,10 +47,10 @@ class SelectiveLeRobotDataset(Dataset):
         keep = ["episode_index"] + [k for k in keys if k in hf.column_names]
         drop = [c for c in hf.column_names if c not in keep]
         if drop:
-            hf = hf.remove_columns(drop)   # cheap column projection (no data copy) :contentReference[oaicite:1]{index=1}
+            hf = hf.remove_columns(drop)
 
         # Return numpy/torch-ready tensors for just those columns
-        hf = hf.with_format(fmt, columns=keep)  # selective materialization :contentReference[oaicite:2]{index=2}
+        hf = hf.with_format(fmt, columns=keep)
         self.hf = hf
 
         # Frame-index subset for requested episodes
@@ -97,8 +97,6 @@ def make_selective_loader(
         persistent_workers=(num_workers > 0),
     )
 
-
-# --- convenience: load only *.ee_error keys ----------------------------------
 def make_error_only_loader(root, repo_id, batch_size=2048, num_workers=4, episodes=None):
     info = _load_info(root, repo_id)
     err_keys = discover_keys(info, suffix=".ee_error")
