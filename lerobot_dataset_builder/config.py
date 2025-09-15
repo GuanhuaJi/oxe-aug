@@ -116,7 +116,7 @@ RLDS_TO_LEROBOT_DATASET_CONFIGS = {
                 "shape": (1,),
             },
             {
-                "rlds_path": "/steps/observation/robot_state",
+                "rlds_path": "/steps/observation/state",
                 "lerobot_path": "observation.state",
                 "dtype": "float32",
                 "shape": (21,),
@@ -160,7 +160,7 @@ RLDS_TO_LEROBOT_DATASET_CONFIGS = {
                 "shape": (256, 320, 3),
             },
             {
-                "rlds_path": "/steps/observation/language_instruction",
+                "rlds_path": "/steps/observation/natural_language_instruction",
                 "lerobot_path": "natural_language_instruction",
                 "dtype": "string",
                 "shape": (1,),
@@ -235,7 +235,7 @@ RLDS_TO_LEROBOT_DATASET_CONFIGS = {
                 "shape": (480, 640, 3),
             },
             {
-                "rlds_path": "/steps/language_instruction",
+                "rlds_path": "/steps/observation/natural_language_instruction",
                 "lerobot_path": "natural_language_instruction",
                 "dtype": "string",
                 "shape": (1,),
@@ -304,7 +304,7 @@ RLDS_TO_LEROBOT_DATASET_CONFIGS = {
         "image_size": (224, 224),
         "rlds_to_lerobot_mappings": [
             {
-                "rlds_path": "/steps/observation/rgb_static",
+                "rlds_path": "/steps/observation/image",
                 "lerobot_path": "observation.images.image",
                 "dtype": "video",
                 "shape": (224, 224, 3),
@@ -360,16 +360,16 @@ RLDS_TO_LEROBOT_DATASET_CONFIGS = {
                 "shape": (360, 640, 3),
             },
             {
-                "rlds_path": "/steps/language_instruction",
-                "lerobot_path": "natural_language_instruction",
-                "dtype": "string",
-                "shape": (1,),
+                "rlds_path": "/steps/observation/instruction",
+                "lerobot_path": "language_instruction_tokens",
+                "dtype": "int32",
+                "shape": (512,),
             },
             {
                 "rlds_path": "/steps/observation/effector_translation",
                 "lerobot_path": "observation.state",
                 "dtype": "float32",
-                "shape": (7,),
+                "shape": (2,),
             },
         ],
     },
