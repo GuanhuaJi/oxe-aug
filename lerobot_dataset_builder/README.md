@@ -1,4 +1,4 @@
-# LeRobot OXE → LeRobot Dataset: Conversion & Stats Guide
+# LeRobot Dataset: Conversion & Stats Guide
 
 This README walks you through installing **LeRobot**, configuring an OXE-to-LeRobot mapping, converting replayed data into the LeRobot format, and computing replay quality stats.
 
