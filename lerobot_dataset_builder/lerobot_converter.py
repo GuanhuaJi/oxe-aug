@@ -4,6 +4,7 @@ import argparse
 import logging
 import os
 os.environ["SVT_LOG"] = "0"
+os.environ["CUDA_VISIBLE_DEVICES"] = "-1"
 import sys
 from pathlib import Path
 import time
@@ -360,3 +361,11 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+'''
+python /home/guanhuaji/oxe-aug/lerobot_dataset_builder/lerobot_converter.py --dataset fractal20220817_data  \
+       --split train --robots panda sawyer ur5e jaco kinova3 kuka_iiwa xarm7   \
+              --start 0 --end 10 --fps 30 --out_root /home/abinayadinesh/lerobot_dataset  \
+                           --trg_root /home/abinayadinesh/rovi_aug_extension_full
+
+'''

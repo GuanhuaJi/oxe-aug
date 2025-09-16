@@ -1,12 +1,13 @@
 # selective_lerobot_dataloader.py
 from __future__ import annotations
 import json
+from functools import lru_cache
 from pathlib import Path
 
 import torch
 from torch.utils.data import Dataset, DataLoader
 from lerobot.datasets.lerobot_dataset import LeRobotDataset
-
+from lerobot.datasets.video_utils import decode_video_frames  # ← frame decode
 
 def _load_info(root, repo_id):
     p = Path(root) / repo_id / "meta" / "info.json"
@@ -21,35 +22,44 @@ def discover_keys(info, suffix=None):
 
 class SelectiveLeRobotDataset(Dataset):
     """
-    Read ONLY selected columns from LeRobot's HF dataset (no video decode).
+    Read selected columns from LeRobot (parquet) and lazily decode requested video keys.
     """
-    def __init__(self, root, repo_id, keys, episodes=None, fmt="torch"):
+    def __init__(self, root, repo_id, keys, episodes=None, fmt="torch", download_videos=False):
         root = Path(root)
         self.root = root
         self.repo_id = repo_id
+        self.ds_dir = (self.root / self.repo_id)
 
-        # Build the base dataset WITHOUT downloading/decoding videos
+        # Build the base dataset; set download_videos=True if you need auto-fetch
         base = LeRobotDataset(
             repo_id=repo_id,
             root=str(root / repo_id),
-            download_videos=False,         # critical: we won't touch videos
+            download_videos=download_videos,
             video_backend="pyav",
         )
+        self.base = base
+        self.meta = base.meta
+        self.tolerance_s = base.tolerance_s
+        self.video_backend = base.video_backend
 
-        # Use the HF dataset inside LeRobot and keep only requested columns
+        # Which of the requested keys are videos?
+        meta_video_keys = set(getattr(self.meta, "video_keys", []))
+        self._video_keys = [k for k in keys if k in meta_video_keys]
+        hf_only_keys = [k for k in keys if k not in meta_video_keys]
+
+        # Use HF dataset for non-video columns
         hf = base.hf_dataset
         try:
             hf.reset_format()
         except Exception:
             pass
 
-        # ensure we always carry episode_index (useful for grouping)
-        keep = ["episode_index"] + [k for k in keys if k in hf.column_names]
+        # Always keep episode_index + timestamp (needed to pick frames)
+        keep = ["episode_index", "timestamp"] + [k for k in hf_only_keys if k in hf.column_names]
         drop = [c for c in hf.column_names if c not in keep]
         if drop:
             hf = hf.remove_columns(drop)
 
-        # Return numpy/torch-ready tensors for just those columns
         hf = hf.with_format(fmt, columns=keep)
         self.hf = hf
 
@@ -66,16 +76,57 @@ class SelectiveLeRobotDataset(Dataset):
                 sel.extend(range(s, t + 1))
             self.index = sel
 
-        self.keys = keep
+        # Reported keys (what __getitem__ returns)
+        self.keys = ["episode_index", "timestamp"] + hf_only_keys + self._video_keys
 
     def __len__(self):
         return len(self.index)
 
-    def __getitem__(self, i):
-        # Pull exactly one row from HF dataset; only selected columns are read
-        row = self.hf[int(self.index[i])]
-        return row
+    @lru_cache(maxsize=None)
+    def _video_path(self, episode_index: int, key: str) -> str:
+        p = Path(self.meta.get_video_file_path(episode_index, key))  # e.g. "videos/chunk-000/..."
+        if not p.is_absolute():
+            p = self.ds_dir / p  # join with dataset root/repo_id
+        return str(p)
 
+    @staticmethod
+    def _to_chw_uint8(x) -> torch.Tensor:
+        t = torch.as_tensor(x)
+        if t.ndim == 4:
+            t = t[0]          # take first (only) frame
+        if t.ndim == 3 and t.shape[-1] in (1, 3, 4):   # HWC -> CHW
+            t = t.permute(2, 0, 1)
+        elif t.ndim == 2:                               # HW -> 1HW
+            t = t.unsqueeze(0)
+        if t.dtype != torch.uint8:
+            t = t.clamp(0, 255).to(torch.uint8)
+        return t
+    
+    def _frame_to_chw_float01(self, frames) -> torch.Tensor:
+        t = torch.as_tensor(frames)
+        if t.ndim == 4:            # take first (only) frame
+            t = t[0]
+        # if decoder returned uint8, normalize; otherwise keep float [0,1]
+        if t.dtype == torch.uint8:
+            t = t.float() / 255.0
+        # ensure CHW
+        if t.ndim == 3 and t.shape[0] not in (1, 3, 4) and t.shape[-1] in (1, 3, 4):
+            t = t.permute(2, 0, 1)
+        # if t.ndim == 3 and t.shape[0] == 3:
+        #     t = t[[2, 1, 0], ...]  # RGB -> BGR
+        return t.contiguous()
+
+    def __getitem__(self, i):
+        row = dict(self.hf[int(self.index[i])])  # parquet-backed fields
+        if self._video_keys:
+            ep = int(row["episode_index"])
+            ts = float(row["timestamp"])
+            for k in self._video_keys:
+                vpath = self._video_path(ep, k)
+                frames = decode_video_frames(vpath, [ts], self.tolerance_s, self.video_backend)
+                # row[k] = self._to_chw_uint8(frames)  # CHW uint8
+                row[k] = self._frame_to_chw_float01(frames)
+        return row
 
 def make_selective_loader(
     root,
@@ -86,8 +137,9 @@ def make_selective_loader(
     num_workers=4,
     episodes=None,
     fmt="torch",
+    download_videos=False,
 ):
-    ds = SelectiveLeRobotDataset(root, repo_id, keys, episodes=episodes, fmt=fmt)
+    ds = SelectiveLeRobotDataset(root, repo_id, keys, episodes=episodes, fmt=fmt, download_videos=download_videos)
     return DataLoader(
         ds,
         batch_size=batch_size,
@@ -95,20 +147,4 @@ def make_selective_loader(
         num_workers=num_workers,
         pin_memory=True,
         persistent_workers=(num_workers > 0),
-    )
-
-def make_error_only_loader(root, repo_id, batch_size=2048, num_workers=4, episodes=None):
-    info = _load_info(root, repo_id)
-    err_keys = discover_keys(info, suffix=".ee_error")
-    if not err_keys:
-        raise RuntimeError(f"No *.ee_error keys found in {repo_id}")
-    return make_selective_loader(
-        root=root,
-        repo_id=repo_id,
-        keys=["episode_index"] + err_keys,   # episode_index included anyway
-        batch_size=batch_size,
-        shuffle=False,
-        num_workers=num_workers,
-        episodes=episodes,
-        fmt="torch",
     )
